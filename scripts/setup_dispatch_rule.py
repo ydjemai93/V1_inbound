@@ -65,7 +65,17 @@ async def create_dispatch_rule(rule_file=None, agent_name=None):
         # Envoi de la requête à LiveKit
         print("Envoi de la requête pour créer la règle de dispatch SIP...")
         response = await livekit_api.sip.create_sip_dispatch_rule(request)
-        print(f"Règle de dispatch SIP créée avec succès: ID = {response.id}")
+
+        rule_id = getattr(response, 'id', None)
+        if rule_id is None:
+            rule_id = getattr(response, 'sid', None)
+        if rule_id is None and hasattr(response, '__dict__'):
+            rule_id = response.__dict__.get('id', response.__dict__.get('sid', str(response)))
+        if rule_id is None:
+            rule_id = str(response)  # Fallback: utiliser la représentation en chaîne
+        
+        print(f"Règle de dispatch SIP créée avec succès: ID = {rule_id}")
+        
         
         # Mise à jour du fichier .env
         # [Code inchangé pour mettre à jour le fichier .env]
