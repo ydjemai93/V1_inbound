@@ -106,3 +106,56 @@ async def create_dispatch_rule(rule_file=None, agent_name=None):
             name=rule_config.get("name", "Inbound Call Rule"),
             rule=dispatch_rule,
             room_config=room_config
+        )
+        
+        # Envoi de la requête à LiveKit
+        print("Envoi de la requête pour créer la règle de dispatch SIP...")
+        response = await livekit_api.sip.create_sip_dispatch_rule(request)
+        print(f"Règle de dispatch SIP créée avec succès: ID = {response.id}")
+        
+        # Ajout au fichier .env
+        env_path = os.path.join(root_dir, ".env")
+        try:
+            with open(env_path, 'r') as env_file:
+                env_content = env_file.read()
+            
+            if 'DISPATCH_RULE_ID' in env_content:
+                # Mise à jour de la valeur existante
+                env_lines = env_content.split('\n')
+                updated_lines = []
+                for line in env_lines:
+                    if line.startswith('DISPATCH_RULE_ID='):
+                        updated_lines.append(f'DISPATCH_RULE_ID={response.id}')
+                    else:
+                        updated_lines.append(line)
+                updated_env = '\n'.join(updated_lines)
+            else:
+                # Ajout de la nouvelle valeur
+                updated_env = f"{env_content}\nDISPATCH_RULE_ID={response.id}"
+            
+            with open(env_path, 'w') as env_file:
+                env_file.write(updated_env)
+            
+            print(f"L'ID de la règle ({response.id}) a été enregistré dans le fichier .env")
+        except Exception as e:
+            print(f"Attention: Impossible de mettre à jour le fichier .env: {e}")
+        
+        return response.id
+    except Exception as e:
+        print(f"Erreur lors de la création de la règle de dispatch SIP: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
+    finally:
+        await livekit_api.aclose()
+
+def main():
+    parser = argparse.ArgumentParser(description='Créer une règle de dispatch SIP dans LiveKit')
+    parser.add_argument('--file', '-f', help='Chemin vers le fichier JSON contenant la configuration de la règle')
+    parser.add_argument('--agent', '-a', help='Nom de l\'agent à dispatcher (par défaut: inbound-agent)')
+    args = parser.parse_args()
+    
+    asyncio.run(create_dispatch_rule(args.file, args.agent))
+
+if __name__ == "__main__":
+    main()
