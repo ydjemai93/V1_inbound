@@ -4,7 +4,7 @@ import json
 import argparse
 from dotenv import load_dotenv
 from livekit import api
-from livekit.protocol.sip import CreateSIPDispatchRuleRequest, SIPDispatchRule, SIPDispatchRuleIndividual, RoomConfiguration, AgentDispatch
+from livekit.protocol.sip import CreateSIPDispatchRuleRequest, SIPDispatchRule, SIPDispatchRuleIndividual
 
 # Chercher le fichier .env à la racine du projet
 root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
