@@ -991,3 +991,86 @@ def register_routes(app):
                 "error": str(e),
                 "traceback": traceback.format_exc()
             }), 500
+            
+    @app.route("/api/dispatch/rules", methods=["GET"])
+    def list_dispatch_rules():
+        try:
+            from livekit import api
+            
+            async def list_rules_async():
+                livekit_api = None
+                try:
+                    livekit_api = api.LiveKitAPI()
+                    
+                    # Liste tous les règles de dispatch existantes
+                    response = await livekit_api.sip.list_sip_dispatch_rules(
+                        api.ListSIPDispatchRuleRequest()
+                    )
+                    
+                    # Formater les règles pour un affichage lisible
+                    rules = [
+                        {
+                            "id": rule.id,
+                            "description": f"Prefix: {rule.rule.dispatch_rule_individual.room_prefix if rule.rule.HasField('dispatch_rule_individual') else 'N/A'}"
+                        } for rule in response.rules
+                    ]
+                    
+                    return {
+                        "success": True,
+                        "rules": rules,
+                        "total_rules": len(rules)
+                    }
+                except Exception as e:
+                    return {
+                        "success": False,
+                        "error": str(e)
+                    }
+                finally:
+                    if livekit_api:
+                        await livekit_api.aclose()
+            
+            result = asyncio.run(list_rules_async())
+            return jsonify(result)
+        
+        except Exception as e:
+            return jsonify({
+                "success": False,
+                "error": str(e)
+            }), 500
+
+    @app.route("/api/dispatch/rule/delete/<rule_id>", methods=["DELETE"])
+    def delete_dispatch_rule(rule_id):
+        try:
+            from livekit import api
+            
+            async def delete_rule_async():
+                livekit_api = None
+                try:
+                    livekit_api = api.LiveKitAPI()
+                    
+                    # Supprimer la règle de dispatch
+                    await livekit_api.sip.delete_sip_dispatch_rule(
+                        api.DeleteSIPDispatchRuleRequest(id=rule_id)
+                    )
+                    
+                    return {
+                        "success": True,
+                        "message": f"Règle de dispatch {rule_id} supprimée avec succès"
+                    }
+                except Exception as e:
+                    return {
+                        "success": False,
+                        "error": str(e)
+                    }
+                finally:
+                    if livekit_api:
+                        await livekit_api.aclose()
+            
+            result = asyncio.run(delete_rule_async())
+            return jsonify(result)
+        
+        except Exception as e:
+            return jsonify({
+                "success": False,
+                "error": str(e)
+            }), 500
