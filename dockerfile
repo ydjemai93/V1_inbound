@@ -11,7 +11,9 @@ RUN apt-get update && apt-get install -y \
 # Copie du requirements.txt à la racine
 COPY requirements.txt /app/
 
-# Installation des dépendances Python
+
+# Installation des dépendances Python avec des versions spécifiques
+RUN pip install --no-cache-dir flask==2.0.1 werkzeug==2.0.1
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
 # Copie des fichiers du projet
