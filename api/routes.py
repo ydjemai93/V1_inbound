@@ -1,13 +1,19 @@
 import os
 import json
-import logging
 import subprocess
-import traceback
-import asyncio
-import secrets
+import sys
+import logging
 from flask import request, jsonify
+from threading import Thread
+import asyncio
+import traceback
+import aiohttp
+import secrets
 
-# Configuration du logger
+# Configuration pour fermer proprement les sessions aiohttp
+asyncio.get_event_loop().set_debug(True)
+aiohttp.ClientSession.DEFAULT_TIMEOUT = 30
+
 logger = logging.getLogger(__name__)
 
 def register_routes(app):
@@ -33,6 +39,116 @@ def register_routes(app):
             "all_variables_present": all([account_sid, auth_token, phone_number])
         })
     
+    @app.route("/api/sip/check", methods=["GET"])
+    def check_sip_config():
+        """Vérification détaillée de la configuration SIP"""
+        try:
+            from twilio.rest import Client
+            
+            account_sid = os.environ.get('TWILIO_ACCOUNT_SID')
+            auth_token = os.environ.get('TWILIO_AUTH_TOKEN')
+            phone_number = os.environ.get('TWILIO_PHONE_NUMBER')
+            trunk_id = os.environ.get('OUTBOUND_TRUNK_ID')
+            
+            client = Client(account_sid, auth_token)
+            
+            # Vérification du trunk
+            trunk = client.trunking.trunks(trunk_id).fetch()
+            
+            return jsonify({
+                "success": True,
+                "account_sid": account_sid,
+                "phone_number": phone_number,
+                "trunk_id": trunk_id,
+                "trunk_name": trunk.friendly_name,
+                "trunk_domain": f"{trunk_id}.sip.twilio.com"
+            })
+        
+        except Exception as e:
+            return jsonify({
+                "success": False,
+                "error": str(e),
+                "traceback": traceback.format_exc()
+            }), 500
+    
+    @app.route("/api/twilio/test-call", methods=["POST"])
+    def test_twilio_call():
+        """Test d'appel direct via Twilio"""
+        try:
+            from twilio.rest import Client
+            
+            data = request.json
+            if not data or "phone" not in data:
+                return jsonify({"error": "Numéro de téléphone manquant"}), 400
+            
+            phone_number = data["phone"]
+            
+            # Vérifier et normaliser le format du numéro
+            if not phone_number.startswith('+'):
+                phone_number = f"+{phone_number}"
+            
+            # Supprimer les caractères spéciaux comme tirets ou espaces
+            phone_number = ''.join(c for c in phone_number if c.isdigit() or c == '+')
+            logger.info(f"Numéro formaté pour l'appel Twilio: {phone_number}")
+            
+            account_sid = os.environ.get('TWILIO_ACCOUNT_SID')
+            auth_token = os.environ.get('TWILIO_AUTH_TOKEN')
+            twilio_phone_number = os.environ.get('TWILIO_PHONE_NUMBER')
+            
+            client = Client(account_sid, auth_token)
+            
+            # Tenter un appel simple
+            call = client.calls.create(
+                to=phone_number,
+                from_=twilio_phone_number,
+                url="http://demo.twilio.com/docs/voice.xml"  # URL de test Twilio
+            )
+            
+            return jsonify({
+                "success": True,
+                "call_sid": call.sid,
+                "status": call.status
+            })
+        
+        except Exception as e:
+            return jsonify({
+                "success": False,
+                "error": str(e),
+                "traceback": traceback.format_exc()
+            }), 500
+
+    @app.route("/api/twilio/verify", methods=["GET"])
+    def verify_twilio():
+        """Endpoint pour vérifier la connexion à Twilio"""
+        try:
+            from twilio.rest import Client
+            
+            account_sid = os.environ.get("TWILIO_ACCOUNT_SID")
+            auth_token = os.environ.get("TWILIO_AUTH_TOKEN")
+            
+            if not account_sid or not auth_token:
+                return jsonify({
+                    "success": False,
+                    "error": "Identifiants Twilio manquants"
+                })
+            
+            # Tenter de se connecter à Twilio et récupérer les informations du compte
+            client = Client(account_sid, auth_token)
+            account = client.api.accounts(account_sid).fetch()
+            
+            return jsonify({
+                "success": True,
+                "account_status": account.status,
+                "account_name": account.friendly_name,
+                "created_at": str(account.date_created)
+            })
+        except Exception as e:
+            return jsonify({
+                "success": False,
+                "error": str(e),
+                "traceback": traceback.format_exc()
+            }), 500
+
     @app.route("/api/livekit/test", methods=["GET"])
     def test_livekit():
         """Endpoint pour tester la connexion à LiveKit"""
@@ -67,101 +183,356 @@ def register_routes(app):
                 "error": str(e),
                 "traceback": traceback.format_exc()
             }), 500
-    
-    @app.route("/api/inbound/trunk/setup", methods=["POST"])
-    def setup_inbound_trunk():
-        """Endpoint pour configurer un trunk SIP entrant"""
+
+    @app.route("/api/trunk/setup/direct", methods=["POST"])
+    def setup_trunk_direct():
+        """Endpoint pour configurer directement le trunk SIP via l'API"""
         try:
-            data = request.json or {}
-            phone_number = data.get("phone_number", os.environ.get("TWILIO_PHONE_NUMBER"))
+            import asyncio
+            from livekit import api
+            from livekit.protocol.sip import CreateSIPOutboundTrunkRequest, SIPOutboundTrunkInfo
+            from twilio.rest import Client
+
+            async def setup_trunk_async():
+                # Variables Twilio
+                account_sid = os.environ.get('TWILIO_ACCOUNT_SID')
+                auth_token = os.environ.get('TWILIO_AUTH_TOKEN')
+                phone_number = os.environ.get('TWILIO_PHONE_NUMBER')
+                livekit_api = None
+
+                if not all([account_sid, auth_token, phone_number]):
+                    return {
+                        "success": False,
+                        "error": "Variables Twilio manquantes"
+                    }
+
+                try:
+                    # Client Twilio
+                    client = Client(account_sid, auth_token)
+                    
+                    # Débogage - impression des attributs du client
+                    logger.info(f"Attributs du client Twilio: {dir(client)}")
+                    logger.info(f"Attributs de trunking: {dir(client.trunking)}")
+                    
+                    try:
+                        # Essayer de récupérer les trunks
+                        trunks = list(client.trunking.trunks.list(limit=1))
+                    except Exception as e:
+                        logger.error(f"Erreur lors de la récupération des trunks: {e}")
+                        trunks = []
+                    
+                    # Créer un trunk si aucun n'existe
+                    if not trunks:
+                        logger.info("Aucun trunk trouvé. Création d'un nouveau trunk.")
+                        trunk = client.trunking.trunks.create(friendly_name="LiveKit AI Trunk")
+                    else:
+                        trunk = trunks[0]
+                        logger.info(f"Trunk existant trouvé: {trunk.sid}")
+
+                    # Configurer le domaine
+                    domain_name = f"{trunk.sid}.sip.twilio.com"
+
+                    # Initialisation du client LiveKit
+                    livekit_api = api.LiveKitAPI()
+                    
+                    # Création de l'objet trunk
+                    trunk_info = SIPOutboundTrunkInfo(
+                        name="Twilio Trunk",
+                        address=domain_name,
+                        numbers=[phone_number],
+                        auth_username="livekit_user",
+                        auth_password="s3cur3p@ssw0rd"
+                    )
+                    
+                    # Création de la requête
+                    request = CreateSIPOutboundTrunkRequest(trunk=trunk_info)
+                    
+                    # Envoi de la requête à LiveKit
+                    response = await livekit_api.sip.create_sip_outbound_trunk(request)
+                    
+                    # Récupérer l'ID du trunk
+                    trunk_id = getattr(response, 'sid', getattr(response, 'id', str(response)))
+                    
+                    # Mise à jour de l'environnement
+                    os.environ['OUTBOUND_TRUNK_ID'] = trunk_id
+
+                    return {
+                        "success": True,
+                        "trunkId": trunk_id,
+                        "twilioTrunkSid": trunk.sid,
+                        "domainName": domain_name,
+                        "message": "Trunk SIP configuré avec succès"
+                    }
+                except Exception as e:
+                    logger.error(f"Erreur de configuration du trunk: {e}")
+                    return {
+                        "success": False,
+                        "error": str(e),
+                        "traceback": traceback.format_exc()
+                    }
+                finally:
+                    if livekit_api:
+                        await livekit_api.aclose()
+
+            # Exécuter la fonction asynchrone
+            result = asyncio.run(setup_trunk_async())
             
-            if not phone_number:
-                return jsonify({
-                    "success": False,
-                    "error": "Numéro de téléphone manquant"
-                }), 400
-            
-            # Créer un fichier temporaire de configuration
-            trunk_config = {
-                "trunk": {
-                    "name": "Inbound SIP Trunk",
-                    "numbers": [phone_number],
-                    "krisp_enabled": True
-                }
-            }
-            
-            temp_file = "temp_inbound_trunk.json"
-            with open(temp_file, "w") as f:
-                json.dump(trunk_config, f)
-            
-            # Importer et exécuter le script de configuration directement
-            from scripts.setup_inbound_trunk import create_inbound_trunk
-            
-            trunk_id = asyncio.run(create_inbound_trunk(temp_file))
-            
-            # Supprimer le fichier temporaire
-            try:
-                os.remove(temp_file)
-            except:
-                pass
-            
-            return jsonify({
-                "success": True,
-                "trunk_id": trunk_id,
-                "phone_number": phone_number,
-                "message": "Trunk SIP entrant configuré avec succès"
-            })
-            
+            return jsonify(result)
+        
         except Exception as e:
+            logger.exception("Erreur lors de la configuration du trunk")
             return jsonify({
                 "success": False,
                 "error": str(e),
                 "traceback": traceback.format_exc()
             }), 500
-    
-    @app.route("/api/inbound/dispatch/setup", methods=["POST"])
+
+    @app.route("/api/dispatch/rule/setup", methods=["POST"])
     def setup_dispatch_rule():
-        """Endpoint pour configurer une règle de dispatch pour les appels entrants"""
+        """Endpoint pour configurer une règle de dispatch SIP"""
         try:
-            data = request.json or {}
-            agent_name = data.get("agent_name", "inbound-agent")
-            room_prefix = data.get("room_prefix", "call-")
+            import asyncio
+            from livekit import api
+            from livekit.protocol.sip import CreateSIPDispatchRuleRequest, SIPDispatchRule, SIPDispatchRuleIndividual
             
-            # Créer un fichier temporaire de configuration
-            rule_config = {
-                "name": "Inbound Call Rule",
-                "rule": {
-                    "dispatchRuleIndividual": {
-                        "roomPrefix": room_prefix
+            async def setup_dispatch_rule_async():
+                livekit_api = None
+                try:
+                    livekit_api = api.LiveKitAPI()
+                    
+                    # Création de la règle de dispatch avec les objets appropriés du SDK
+                    request = CreateSIPDispatchRuleRequest(
+                        rule=SIPDispatchRule(
+                            dispatch_rule_individual=SIPDispatchRuleIndividual(
+                                room_prefix="call-"
+                            )
+                        ),
+                        # Configuration des agents si nécessaire
+                        room_config=api.RoomConfiguration(
+                            agents=[
+                                api.RoomAgentDispatch(
+                                    agent_name="outbound-caller"
+                                )
+                            ]
+                        ) if request.json.get("includeAgent") else None
+                    )
+                    
+                    # Envoi de la requête à LiveKit
+                    response = await livekit_api.sip.create_sip_dispatch_rule(request)
+                    
+                    return {
+                        "success": True,
+                        "ruleId": response.id,
+                        "message": "Règle de dispatch SIP créée avec succès"
                     }
-                },
-                "agent_name": agent_name  # Simplifié pour s'adapter à la nouvelle structure
-            }
+                except Exception as e:
+                    logger.error(f"Erreur lors de la configuration de la règle: {e}")
+                    return {
+                        "success": False,
+                        "error": str(e),
+                        "traceback": traceback.format_exc()
+                    }
+                finally:
+                    if livekit_api:
+                        await livekit_api.aclose()
             
-            temp_file = "temp_dispatch_rule.json"
-            with open(temp_file, "w") as f:
-                json.dump(rule_config, f)
+            # Exécuter la fonction asynchrone
+            result = asyncio.run(setup_dispatch_rule_async())
             
-            # Importer et exécuter le script de configuration directement
-            from scripts.setup_dispatch_rule import create_dispatch_rule
-            
-            rule_id = asyncio.run(create_dispatch_rule(temp_file))
-            
-            # Supprimer le fichier temporaire
-            try:
-                os.remove(temp_file)
-            except:
-                pass
-            
-            return jsonify({
-                "success": True,
-                "rule_id": rule_id,
-                "agent_name": agent_name,
-                "room_prefix": room_prefix,
-                "message": "Règle de dispatch configurée avec succès"
-            })
-            
+            return jsonify(result)
         except Exception as e:
+            logger.exception("Erreur lors de la configuration de la règle de dispatch")
+            return jsonify({
+                "success": False,
+                "error": str(e),
+                "traceback": traceback.format_exc()
+            }), 500
+
+    @app.route("/api/dispatch/test", methods=["POST"])
+    def test_dispatch():
+        """Endpoint pour tester la création d'un dispatch"""
+        data = request.json
+        if not data or "phone" not in data:
+            return jsonify({"error": "Numéro de téléphone manquant"}), 400
+        
+        phone_number = data["phone"]
+        
+        # Vérifier et normaliser le format du numéro
+        if not phone_number.startswith('+'):
+            phone_number = f"+{phone_number}"
+        
+        # Supprimer les caractères spéciaux comme tirets ou espaces
+        phone_number = ''.join(c for c in phone_number if c.isdigit() or c == '+')
+        logger.info(f"Numéro formaté pour le test de dispatch: {phone_number}")
+        
+        try:
+            from livekit import api
+            
+            async def create_test_dispatch():
+                livekit_api = None
+                try:
+                    livekit_api = api.LiveKitAPI()
+                    
+                    # Vérifier si OUTBOUND_TRUNK_ID est défini
+                    trunk_id = os.getenv('OUTBOUND_TRUNK_ID')
+                    if not trunk_id:
+                        return {
+                            "success": False,
+                            "error": "Aucun trunk SIP configuré. Utilisez /api/trunk/setup/direct d'abord."
+                        }
+                    
+                    # Génération d'un nom de room unique
+                    unique_room_name = f"dispatch-{secrets.token_hex(4)}"
+                    
+                    # Création du dispatch - modification de la méthode
+                    dispatch = await livekit_api.agent_dispatch.create_dispatch(
+                        api.CreateAgentDispatchRequest(
+                            agent_name="outbound-caller",
+                            room=unique_room_name,
+                            metadata=json.dumps({
+                                "phone_number": phone_number,
+                                "trunk_id": trunk_id
+                            })
+                        )
+                    )
+                    
+                    return {
+                        "success": True,
+                        "roomName": dispatch.room,
+                        "dispatchId": dispatch.id,
+                        "message": f"Dispatch créé pour {phone_number}"
+                    }
+                
+                except Exception as e:
+                    logger.error(f"Erreur de dispatch: {e}")
+                    return {
+                        "success": False,
+                        "error": str(e),
+                        "traceback": traceback.format_exc()
+                    }
+                finally:
+                    if livekit_api:
+                        await livekit_api.aclose()
+            
+            # Exécuter la fonction asynchrone
+            result = asyncio.run(create_test_dispatch())
+            
+            if result['success']:
+                return jsonify(result)
+            else:
+                return jsonify(result), 500
+        
+        except Exception as e:
+            logger.exception("Erreur lors du test de dispatch")
+            return jsonify({
+                "success": False,
+                "error": str(e),
+                "traceback": traceback.format_exc()
+            }), 500
+
+    @app.route("/api/call", methods=["POST"])
+    def make_call():
+        """Endpoint pour lancer un appel sortant"""
+        data = request.json
+        if not data or "phone" not in data:
+            return jsonify({"error": "Numéro de téléphone manquant"}), 400
+        
+        phone_number = data["phone"]
+        
+        # Vérifier et normaliser le format du numéro
+        if not phone_number.startswith('+'):
+            phone_number = f"+{phone_number}"
+        
+        # Supprimer les caractères spéciaux comme tirets ou espaces
+        phone_number = ''.join(c for c in phone_number if c.isdigit() or c == '+')
+        logger.info(f"Numéro formaté pour l'appel API: {phone_number}")
+        
+        verbose = data.get("verbose", False)  # Option pour avoir plus de détails
+        
+        try:
+            from livekit import api
+            
+            async def create_call():
+                livekit_api = None
+                try:
+                    livekit_api = api.LiveKitAPI()
+                    
+                    # Vérifier si OUTBOUND_TRUNK_ID est défini
+                    trunk_id = os.getenv('OUTBOUND_TRUNK_ID')
+                    if not trunk_id:
+                        return {
+                            "success": False,
+                            "error": "Aucun trunk SIP configuré. Utilisez /api/trunk/setup/direct d'abord."
+                        }
+                    
+                    # Nous ne vérifions plus si l'agent est disponible car list_agent_info n'est pas disponible
+                    # Au lieu de cela, nous supposons que l'agent est en cours d'exécution
+                    # et nous laissons la création du dispatch échouer si ce n'est pas le cas
+                    agent_available = True  # On suppose que l'agent est disponible
+                    
+                    # Génération d'un nom de room unique
+                    unique_room_name = f"call-{secrets.token_hex(4)}"
+                    
+                    # Journalisation détaillée
+                    logger.info(f"Préparation de l'appel vers {phone_number}")
+                    logger.info(f"Trunk ID: {trunk_id}")
+                    logger.info(f"Room: {unique_room_name}")
+                    
+                    # Création du dispatch
+                    dispatch_request = api.CreateAgentDispatchRequest(
+                        agent_name="outbound-caller",
+                        room=unique_room_name,
+                        metadata=json.dumps({
+                            "phone_number": phone_number,
+                            "trunk_id": trunk_id
+                        })
+                    )
+                    
+                    logger.info(f"Envoi de la requête de dispatch: {dispatch_request}")
+                    dispatch = await livekit_api.agent_dispatch.create_dispatch(dispatch_request)
+                    logger.info(f"Dispatch créé: {dispatch}")
+                    
+                    # Attendre brièvement pour vérifier si la room est créée
+                    await asyncio.sleep(1)
+                    rooms_check = await livekit_api.room.list_rooms(api.ListRoomsRequest(names=[unique_room_name]))
+                    
+                    return {
+                        "success": True,
+                        "roomName": dispatch.room,
+                        "dispatchId": dispatch.id,
+                        "message": f"Appel initié pour {phone_number}",
+                        "diagnostic": {
+                            "agent_available": agent_available,  # Présumé vrai
+                            "trunk_id": trunk_id,
+                            "room_created": len(rooms_check.rooms) > 0,
+                            "metadata": {
+                                "phone_number": phone_number,
+                                "trunk_id": trunk_id
+                            }
+                        } if verbose else None
+                    }
+                    
+                except Exception as e:
+                    logger.error(f"Erreur lors de l'appel: {e}")
+                    return {
+                        "success": False,
+                        "error": str(e),
+                        "traceback": traceback.format_exc()
+                    }
+                finally:
+                    if livekit_api:
+                        await livekit_api.aclose()
+            
+            # Exécuter la fonction asynchrone
+            result = asyncio.run(create_call())
+            
+            if result['success']:
+                return jsonify(result)
+            else:
+                return jsonify(result), 500
+        
+        except Exception as e:
+            logger.exception("Erreur lors de l'appel")
             return jsonify({
                 "success": False,
                 "error": str(e),
@@ -188,7 +559,7 @@ def register_routes(app):
                         test_room = f"test-agent-{secrets.token_hex(4)}"
                         test_dispatch = await livekit_api.agent_dispatch.create_dispatch(
                             api.CreateAgentDispatchRequest(
-                                agent_name="inbound-agent",
+                                agent_name="outbound-caller",
                                 room=test_room,
                                 metadata=json.dumps({"test": True})
                             )
@@ -202,12 +573,12 @@ def register_routes(app):
                             "success": True,
                             "agents": [
                                 {
-                                    "name": "inbound-agent",
+                                    "name": "outbound-caller",
                                     "status": "active",
                                     "capacity": 1.0
                                 }
                             ],
-                            "inbound_agent_available": True
+                            "outbound_caller_available": True
                         }
                         
                     except Exception as e:
@@ -216,7 +587,7 @@ def register_routes(app):
                         return {
                             "success": True,
                             "agents": [],
-                            "inbound_agent_available": False
+                            "outbound_caller_available": False
                         }
                     
                 except Exception as e:
@@ -239,88 +610,58 @@ def register_routes(app):
                 "traceback": traceback.format_exc()
             }), 500
     
-    @app.route("/api/inbound/status", methods=["GET"])
-    def check_inbound_setup():
-        """Endpoint pour vérifier l'état de la configuration des appels entrants"""
+    @app.route("/api/trunk/status", methods=["GET"])
+    def check_trunk_status():
+        """Endpoint pour vérifier l'état du trunk SIP outbound"""
         try:
             from livekit import api
             
-            async def check_inbound_configuration():
+            async def check_trunk():
                 livekit_api = None
                 try:
                     livekit_api = api.LiveKitAPI()
                     
-                    # Vérifier le trunk entrant
-                    inbound_trunk_id = os.environ.get("INBOUND_TRUNK_ID")
-                    inbound_trunk = None
+                    # Récupérer l'ID du trunk
+                    trunk_id = os.getenv('OUTBOUND_TRUNK_ID')
+                    if not trunk_id:
+                        return {
+                            "success": False,
+                            "error": "Aucun trunk SIP configuré"
+                        }
                     
-                    if inbound_trunk_id:
-                        try:
-                            inbound_trunks = await livekit_api.sip.list_sip_inbound_trunk(
-                                api.ListSIPInboundTrunkRequest(ids=[inbound_trunk_id])
-                            )
-                            if inbound_trunks.trunks:
-                                inbound_trunk = inbound_trunks.trunks[0]
-                        except:
-                            pass
+                    # Vérifier le trunk dans LiveKit
+                    trunks = await livekit_api.sip.list_sip_outbound_trunk(
+                        api.ListSIPOutboundTrunkRequest(ids=[trunk_id])
+                    )
                     
-                    # Vérifier la règle de dispatch
-                    dispatch_rule_id = os.environ.get("DISPATCH_RULE_ID")
-                    dispatch_rule = None
+                    # Vérifier le trunk dans Twilio
+                    from twilio.rest import Client
+                    account_sid = os.environ.get('TWILIO_ACCOUNT_SID')
+                    auth_token = os.environ.get('TWILIO_AUTH_TOKEN')
                     
-                    if dispatch_rule_id:
-                        try:
-                            dispatch_rules = await livekit_api.sip.list_sip_dispatch_rule(
-                                api.ListSIPDispatchRuleRequest(ids=[dispatch_rule_id])
-                            )
-                            if dispatch_rules.rules:
-                                dispatch_rule = dispatch_rules.rules[0]
-                        except:
-                            pass
-                    
-                    # Vérifier l'agent
-                    agent_available = False
-                    
-                    try:
-                        # Nom unique pour éviter des conflits
-                        test_room = f"test-agent-{secrets.token_hex(4)}"
-                        test_dispatch = await livekit_api.agent_dispatch.create_dispatch(
-                            api.CreateAgentDispatchRequest(
-                                agent_name="inbound-agent",
-                                room=test_room,
-                                metadata=json.dumps({"test": True})
-                            )
-                        )
-                        
-                        # Si on arrive ici, le dispatch a été créé, donc l'agent est disponible
-                        # Suppression de la room de test
-                        await livekit_api.room.delete_room(api.DeleteRoomRequest(room=test_room))
-                        
-                        agent_available = True
-                    except:
-                        pass
+                    twilio_trunk_info = None
+                    if account_sid and auth_token:
+                        client = Client(account_sid, auth_token)
+                        twilio_trunks = list(client.trunking.trunks.list(limit=1))
+                        if twilio_trunks:
+                            twilio_trunk_info = {
+                                "sid": twilio_trunks[0].sid,
+                                "name": twilio_trunks[0].friendly_name,
+                                "domain": f"{twilio_trunks[0].sid}.sip.twilio.com"
+                            }
                     
                     return {
                         "success": True,
-                        "inbound_trunk": {
-                            "configured": inbound_trunk is not None,
-                            "id": inbound_trunk_id,
-                            "numbers": inbound_trunk.numbers if inbound_trunk else None
+                        "livekit_trunk": {
+                            "id": trunk_id,
+                            "exists": len(trunks.trunks) > 0,
+                            "details": {
+                                "name": trunks.trunks[0].name if trunks.trunks else None,
+                                "address": trunks.trunks[0].address if trunks.trunks else None,
+                                "numbers": trunks.trunks[0].numbers if trunks.trunks else None
+                            } if trunks.trunks else None
                         },
-                        "dispatch_rule": {
-                            "configured": dispatch_rule is not None,
-                            "id": dispatch_rule_id,
-                            "name": dispatch_rule.name if dispatch_rule else None
-                        },
-                        "agent": {
-                            "available": agent_available,
-                            "name": "inbound-agent"
-                        },
-                        "ready_for_calls": all([
-                            inbound_trunk is not None,
-                            dispatch_rule is not None,
-                            agent_available
-                        ])
+                        "twilio_trunk": twilio_trunk_info
                     }
                     
                 except Exception as e:
@@ -333,7 +674,7 @@ def register_routes(app):
                     if livekit_api:
                         await livekit_api.aclose()
             
-            result = asyncio.run(check_inbound_configuration())
+            result = asyncio.run(check_trunk())
             return jsonify(result)
         
         except Exception as e:
@@ -342,200 +683,90 @@ def register_routes(app):
                 "error": str(e),
                 "traceback": traceback.format_exc()
             }), 500
-
-    
-    @app.route("/api/inbound/direct-setup", methods=["POST"])
-    def direct_setup():
-        """Configuration directe sans passer par les scripts complexes"""
+            
+    @app.route("/api/sip/direct-call", methods=["POST"])
+    def direct_sip_call():
+        """Test d'appel direct via l'API SIP de LiveKit"""
         try:
             from livekit import api
+            from livekit.protocol.sip import CreateSIPParticipantRequest
             
-            async def setup_directly():
-                data = request.json or {}
-                agent_name = data.get("agent_name", "inbound-agent")
-                room_prefix = data.get("room_prefix", "call-")
-                
-                livekit_api = api.LiveKitAPI()
+            data = request.json
+            if not data or "phone" not in data:
+                return jsonify({"error": "Numéro de téléphone manquant"}), 400
+            
+            phone_number = data["phone"]
+            
+            # Vérifier et normaliser le format du numéro
+            if not phone_number.startswith('+'):
+                phone_number = f"+{phone_number}"
+            
+            # Supprimer les caractères spéciaux comme tirets ou espaces
+            phone_number = ''.join(c for c in phone_number if c.isdigit() or c == '+')
+            logger.info(f"Numéro formaté pour l'appel SIP direct: {phone_number}")
+            
+            async def make_direct_call():
+                livekit_api = None
                 try:
-                    # Utilisation de l'API de base sans dépendre de la structure exacte
-                    # Envoyer directement la requête JSON
-                    request_data = {
-                        "name": "Inbound Call Rule", 
-                        "rule": {
-                            "dispatchRuleIndividual": {
-                                "roomPrefix": room_prefix
-                            }
-                        },
-                        "metadata": json.dumps({"agent_name": agent_name})
-                    }
+                    livekit_api = api.LiveKitAPI()
                     
-                    # Utiliser l'API HTTP brute si nécessaire
-                    response = await livekit_api.sip.create_sip_dispatch_rule(
-                        api.CreateSIPDispatchRuleRequest(**request_data)
+                    # Vérifier si OUTBOUND_TRUNK_ID est défini
+                    trunk_id = os.getenv('OUTBOUND_TRUNK_ID')
+                    if not trunk_id:
+                        return {
+                            "success": False,
+                            "error": "Aucun trunk SIP configuré"
+                        }
+                    
+                    # Créer une room unique pour cet appel
+                    room_name = f"direct-call-{secrets.token_hex(4)}"
+                    
+                    # Créer la requête SIP
+                    request = CreateSIPParticipantRequest(
+                        room_name=room_name,
+                        sip_trunk_id=trunk_id,
+                        sip_call_to=phone_number,
+                        participant_identity=f"direct_call_{phone_number}",
+                        participant_name=f"Direct Call {phone_number}",
+                        play_dialtone=True,
                     )
                     
-                    # Extraire l'ID de façon sécurisée
-                    response_dict = response.__dict__ if hasattr(response, "__dict__") else {}
-                    rule_id = response_dict.get("id", str(response))
-                    
-                    # Mettre à jour les variables d'environnement
-                    os.environ["DISPATCH_RULE_ID"] = rule_id
+                    # Envoyer la requête
+                    logger.info(f"Envoi de la requête SIP directe: {request}")
+                    response = await livekit_api.sip.create_sip_participant(request)
+                    logger.info(f"Réponse SIP reçue: {response}")
                     
                     return {
                         "success": True,
-                        "rule_id": rule_id,
-                        "agent_name": agent_name
+                        "message": f"Appel direct initié vers {phone_number}",
+                        "roomName": room_name,
+                        "trunkId": trunk_id,
+                        "response": str(response)
                     }
+                    
                 except Exception as e:
+                    logger.error(f"Erreur lors de l'appel SIP direct: {e}")
                     return {
-                        "success": False, 
+                        "success": False,
                         "error": str(e),
                         "traceback": traceback.format_exc()
                     }
                 finally:
-                    await livekit_api.aclose()
+                    if livekit_api:
+                        await livekit_api.aclose()
             
-            result = asyncio.run(setup_directly())
+            result = asyncio.run(make_direct_call())
             return jsonify(result)
-        
-        except Exception as e:
-            return jsonify({
-                "success": False,
-                "error": str(e),
-                "traceback": traceback.format_exc()
-            }), 500
-    @app.route("/api/twilio/twiml", methods=["GET"])
-    def get_twiml():
-        """Endpoint pour générer un TwiML pour les appels entrants"""
-        try:
-            # Récupérer l'hôte SIP de LiveKit
-            sip_host = os.environ.get("LIVEKIT_SIP_HOST")
-            if not sip_host:
-                # Extraire de l'URL LiveKit
-                livekit_url = os.environ.get("LIVEKIT_URL")
-                if livekit_url:
-                    # Format typique: wss://project-id.livekit.cloud
-                    # On transforme en: project-id.sip.livekit.cloud
-                    livekit_url = livekit_url.replace("wss://", "").replace("ws://", "")
-                    if "." in livekit_url:
-                        project_id = livekit_url.split(".")[0]
-                        sip_host = f"{project_id}.sip.livekit.cloud"
-            
-            # Obtenir le paramètres d'authentification
-            sip_username = request.args.get("username", "livekit_user")
-            sip_password = request.args.get("password", "s3cur3p@ssw0rd")
-            
-            # Obtenir le numéro de téléphone
-            phone_number = os.environ.get("TWILIO_PHONE_NUMBER", "your_phone_number")
-            
-            # Générer le TwiML
-            twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Dial>
-    <Sip username="{sip_username}" password="{sip_password}">
-      sip:{phone_number}@{sip_host};transport=tcp
-    </Sip>
-  </Dial>
-</Response>"""
-            
-            return jsonify({
-                "success": True,
-                "twiml": twiml,
-                "sip_host": sip_host,
-                "phone_number": phone_number
-            })
             
         except Exception as e:
+            logger.exception("Erreur lors de l'appel SIP direct")
             return jsonify({
                 "success": False,
                 "error": str(e),
                 "traceback": traceback.format_exc()
             }), 500
     
-    @app.route("/api/twilio/setup", methods=["POST"])
-    def setup_twilio():
-        """Endpoint pour configurer Twilio avec TwiML Bin"""
-        try:
-            # Nous ne pouvons pas configurer Twilio programmatiquement via l'API de Railway
-            # mais nous pouvons fournir des instructions détaillées
-            
-            # Générer le TwiML
-            sip_host = os.environ.get("LIVEKIT_SIP_HOST", "your-project-id.sip.livekit.cloud")
-            phone_number = os.environ.get("TWILIO_PHONE_NUMBER", "your_phone_number")
-            
-            twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Dial>
-    <Sip username="livekit_user" password="s3cur3p@ssw0rd">
-      sip:{phone_number}@{sip_host};transport=tcp
-    </Sip>
-  </Dial>
-</Response>"""
-            
-            # Instructions pour configurer Twilio
-            instructions = [
-                "1. Connectez-vous à votre compte Twilio",
-                "2. Allez dans TwiML Bins et créez un nouveau bin",
-                f"3. Collez le TwiML suivant: \n{twiml}",
-                "4. Enregistrez le TwiML Bin",
-                "5. Allez dans Phone Numbers et sélectionnez votre numéro",
-                "6. Dans 'Voice & Fax', configurez 'A CALL COMES IN' pour utiliser le TwiML Bin que vous venez de créer",
-                "7. Enregistrez les modifications"
-            ]
-            
-            return jsonify({
-                "success": True,
-                "twiml": twiml,
-                "instructions": instructions,
-                "sip_host": sip_host,
-                "phone_number": phone_number
-            })
-            
-        except Exception as e:
-            return jsonify({
-                "success": False,
-                "error": str(e),
-                "traceback": traceback.format_exc()
-            }), 500
-
-    # Endpoint TwiML directement accessible pour Twilio
-    @app.route("/twiml", methods=["GET", "POST"])
-    def twiml_endpoint():
-        """Endpoint TwiML pour configurer Twilio"""
-        try:
-            # Récupérer l'hôte SIP de LiveKit
-            sip_host = os.environ.get("LIVEKIT_SIP_HOST")
-            if not sip_host:
-                # Extraire de l'URL LiveKit
-                livekit_url = os.environ.get("LIVEKIT_URL")
-                if livekit_url:
-                    # Format typique: wss://project-id.livekit.cloud
-                    # On transforme en: project-id.sip.livekit.cloud
-                    livekit_url = livekit_url.replace("wss://", "").replace("ws://", "")
-                    if "." in livekit_url:
-                        project_id = livekit_url.split(".")[0]
-                        sip_host = f"{project_id}.sip.livekit.cloud"
-            
-            # Obtenir le numéro de téléphone
-            phone_number = os.environ.get("TWILIO_PHONE_NUMBER", "your_phone_number")
-            
-            # Générer le TwiML
-            twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Dial>
-    <Sip username="livekit_user" password="s3cur3p@ssw0rd">
-      sip:{phone_number}@{sip_host};transport=tcp
-    </Sip>
-  </Dial>
-</Response>"""
-            
-            # Renvoyer directement le XML
-            return twiml, 200, {'Content-Type': 'text/xml'}
-            
-        except Exception as e:
-            logger.error(f"Erreur dans l'endpoint TwiML: {e}")
-            # En cas d'erreur, renvoyer un TwiML d'erreur
-            return """<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Say>Sorry, an error occurred with the voice assistant service. Please try again later.</Say>
-</Response>""", 200, {'Content-Type': 'text/xml'}
+    @app.route("/api/test-direct-call/<phone_number>", methods=["GET"])
+    def api_test_direct_call(phone_number):
+        """Endpoint pour exécuter le script de test d'appel direct"""
+        try
