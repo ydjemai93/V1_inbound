@@ -7,7 +7,7 @@ livekit-plugins-openai<1.0.0
 livekit-plugins-deepgram<1.0.0
 livekit-plugins-silero==0.7.5
 # Spécifier une version plus ancienne d'onnxruntime qui est plus stable
-onnxruntime==1.15.1
+onnxruntime==1.21.0
 livekit-plugins-cartesia<1.0.0
 twilio==7.16.0
 requests==2.28.1
