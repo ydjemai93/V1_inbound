@@ -342,7 +342,68 @@ def register_routes(app):
                 "error": str(e),
                 "traceback": traceback.format_exc()
             }), 500
+
     
+    @app.route("/api/inbound/direct-setup", methods=["POST"])
+    def direct_setup():
+        """Configuration directe sans passer par les scripts complexes"""
+        try:
+            from livekit import api
+            
+            async def setup_directly():
+                data = request.json or {}
+                agent_name = data.get("agent_name", "inbound-agent")
+                room_prefix = data.get("room_prefix", "call-")
+                
+                livekit_api = api.LiveKitAPI()
+                try:
+                    # Utilisation de l'API de base sans dépendre de la structure exacte
+                    # Envoyer directement la requête JSON
+                    request_data = {
+                        "name": "Inbound Call Rule", 
+                        "rule": {
+                            "dispatchRuleIndividual": {
+                                "roomPrefix": room_prefix
+                            }
+                        },
+                        "metadata": json.dumps({"agent_name": agent_name})
+                    }
+                    
+                    # Utiliser l'API HTTP brute si nécessaire
+                    response = await livekit_api.sip.create_sip_dispatch_rule(
+                        api.CreateSIPDispatchRuleRequest(**request_data)
+                    )
+                    
+                    # Extraire l'ID de façon sécurisée
+                    response_dict = response.__dict__ if hasattr(response, "__dict__") else {}
+                    rule_id = response_dict.get("id", str(response))
+                    
+                    # Mettre à jour les variables d'environnement
+                    os.environ["DISPATCH_RULE_ID"] = rule_id
+                    
+                    return {
+                        "success": True,
+                        "rule_id": rule_id,
+                        "agent_name": agent_name
+                    }
+                except Exception as e:
+                    return {
+                        "success": False, 
+                        "error": str(e),
+                        "traceback": traceback.format_exc()
+                    }
+                finally:
+                    await livekit_api.aclose()
+            
+            result = asyncio.run(setup_directly())
+            return jsonify(result)
+        
+        except Exception as e:
+            return jsonify({
+                "success": False,
+                "error": str(e),
+                "traceback": traceback.format_exc()
+            }), 500
     @app.route("/api/twilio/twiml", methods=["GET"])
     def get_twiml():
         """Endpoint pour générer un TwiML pour les appels entrants"""
