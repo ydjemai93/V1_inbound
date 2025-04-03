@@ -769,4 +769,254 @@ def register_routes(app):
     @app.route("/api/test-direct-call/<phone_number>", methods=["GET"])
     def api_test_direct_call(phone_number):
         """Endpoint pour exécuter le script de test d'appel direct"""
-        try
+        try:
+            # Vérifier et normaliser le format du numéro
+            if not phone_number.startswith('+'):
+                phone_number = f"+{phone_number}"
+            
+            # Supprimer les caractères spéciaux comme tirets ou espaces
+            phone_number = ''.join(c for c in phone_number if c.isdigit() or c == '+')
+            logger.info(f"Numéro formaté pour le test direct: {phone_number}")
+            
+            # Importation depuis le module (assurez-vous que scripts/test_direct_sip_call.py existe)
+            from livekit import api
+            from livekit.protocol.sip import CreateSIPParticipantRequest
+            
+            # Récupération du trunk ID
+            trunk_id = os.getenv('OUTBOUND_TRUNK_ID')
+            if not trunk_id:
+                return jsonify({
+                    "success": False,
+                    "error": "Aucun trunk SIP configuré. Utilisez /api/trunk/setup/direct d'abord."
+                })
+            
+            # Créer un collecteur de logs
+            class LogCollector:
+                def __init__(self):
+                    self.logs = []
+                
+                def info(self, message):
+                    self.logs.append(f"INFO: {message}")
+                    logger.info(message)
+                
+                def warning(self, message):
+                    self.logs.append(f"WARNING: {message}")
+                    logger.warning(message)
+                
+                def error(self, message):
+                    self.logs.append(f"ERROR: {message}")
+                    logger.error(message)
+                
+                def exception(self, message):
+                    self.logs.append(f"EXCEPTION: {message}")
+                    logger.exception(message)
+            
+            # Fonction d'appel direct
+            async def make_direct_call():
+                log_collector = LogCollector()
+                livekit_api = None
+                
+                try:
+                    # Initialisation du client LiveKit
+                    livekit_api = api.LiveKitAPI()
+                    
+                    # Création d'un nom de room unique
+                    import secrets
+                    room_name = f"test-call-{secrets.token_hex(4)}"
+                    
+                    log_collector.info(f"====== TEST D'APPEL DIRECT ======")
+                    log_collector.info(f"Numéro de téléphone: {phone_number}")
+                    log_collector.info(f"Trunk ID: {trunk_id}")
+                    log_collector.info(f"Room Name: {room_name}")
+                    
+                    # Création de la requête SIP
+                    request = CreateSIPParticipantRequest(
+                        room_name=room_name,
+                        sip_trunk_id=trunk_id,
+                        sip_call_to=phone_number,
+                        participant_identity=f"test_user_{phone_number}",
+                        participant_name=f"Test Call {phone_number}",
+                        play_dialtone=True,
+                    )
+                    
+                    # Envoi de la requête
+                    log_collector.info(f"Envoi de la requête SIP: {request}")
+                    response = await livekit_api.sip.create_sip_participant(request)
+                    log_collector.info(f"Réponse SIP reçue: {response}")
+                    
+                    # Attendre quelques secondes pour permettre à l'appel de démarrer
+                    log_collector.info("Attente pendant l'établissement de l'appel...")
+                    await asyncio.sleep(5)
+                    
+                    # Vérifier si la room existe et contient des participants
+                    room_info = await livekit_api.room.list_rooms(api.ListRoomsRequest(names=[room_name]))
+                    
+                    if room_info.rooms:
+                        room = room_info.rooms[0]
+                        log_collector.info(f"Room créée. Nombre de participants: {room.num_participants}")
+                        
+                        # Surveiller la room pendant un certain temps
+                        log_collector.info("Surveillance de la room pour 60 secondes...")
+                        for i in range(12):  # 60 secondes au total
+                            await asyncio.sleep(5)
+                            room_info = await livekit_api.room.list_rooms(api.ListRoomsRequest(names=[room_name]))
+                            if not room_info.rooms:
+                                log_collector.info("La room n'existe plus, l'appel s'est terminé")
+                                break
+                                
+                            room = room_info.rooms[0]
+                            log_collector.info(f"Statut de la room après {(i+1)*5} secondes: {room.num_participants} participants")
+                    else:
+                        log_collector.warning("La room n'a pas été créée ou a déjà été supprimée")
+                    
+                    log_collector.info("Fin du test d'appel direct")
+                    
+                    return {
+                        "success": True,
+                        "message": f"Test d'appel direct exécuté pour {phone_number}",
+                        "roomName": room_name,
+                        "logs": log_collector.logs
+                    }
+                    
+                except Exception as e:
+                    log_collector.error(f"Erreur lors du test d'appel direct: {e}")
+                    import traceback
+                    trace = traceback.format_exc()
+                    log_collector.error(trace)
+                    return {
+                        "success": False,
+                        "error": str(e),
+                        "traceback": trace,
+                        "logs": log_collector.logs
+                    }
+                finally:
+                    if livekit_api:
+                        await livekit_api.aclose()
+            
+            # Exécuter la fonction d'appel direct
+            result = asyncio.run(make_direct_call())
+            return jsonify(result)
+            
+        except Exception as e:
+            logger.exception("Erreur lors de l'exécution du test d'appel direct")
+            return jsonify({
+                "success": False,
+                "error": str(e),
+                "traceback": traceback.format_exc()
+            }), 500
+
+    @app.route("/api/trunk/reconfigure", methods=["POST"])
+    def reconfigure_trunk():
+        """Reconfigure le trunk SIP avec des paramètres plus détaillés"""
+        try:
+            import asyncio
+            from livekit import api
+            from livekit.protocol.sip import CreateSIPOutboundTrunkRequest, SIPOutboundTrunkInfo
+            from twilio.rest import Client
+    
+            async def reconfigure_trunk_async():
+                livekit_api = None
+                try:
+                    # Variables Twilio
+                    account_sid = os.environ.get('TWILIO_ACCOUNT_SID')
+                    auth_token = os.environ.get('TWILIO_AUTH_TOKEN')
+                    phone_number = os.environ.get('TWILIO_PHONE_NUMBER')
+                    existing_trunk_id = os.environ.get('OUTBOUND_TRUNK_ID')
+                    
+                    if not all([account_sid, auth_token, phone_number]):
+                        return {
+                            "success": False,
+                            "error": "Variables Twilio manquantes"
+                        }
+                    
+                    # Client Twilio
+                    client = Client(account_sid, auth_token)
+                    
+                    # Afficher l'ancien trunk ID
+                    logger.info(f"Trunk ID existant: {existing_trunk_id}")
+                    logger.info("Note: La suppression de trunk n'est pas supportée, nous allons créer un nouveau trunk")
+                    
+                    try:
+                        # Récupérer ou créer un trunk
+                        trunks = list(client.trunking.trunks.list(limit=1))
+                        if trunks:
+                            trunk = trunks[0]
+                            logger.info(f"Utilisation du trunk Twilio existant: {trunk.sid}")
+                        else:
+                            trunk = client.trunking.trunks.create(friendly_name="LiveKit AI Trunk")
+                            logger.info(f"Nouveau trunk Twilio créé: {trunk.sid}")
+                        
+                        # Gestion des credentials
+                        # Pour Twilio, les credentials sont gérés différemment
+                        # Nous allons utiliser CredentialList
+                        cred_lists = list(client.api.credential_lists.list(limit=1))
+                        if not cred_lists:
+                            logger.info("Création d'une nouvelle credential list Twilio")
+                            cred_list = client.api.credential_lists.create(
+                                friendly_name="LiveKit Credentials"
+                            )
+                            # Ajout des identifiants à la liste de credentials
+                            cred_list.credentials.create(
+                                username="livekit_user", 
+                                password="s3cur3p@ssw0rd"
+                            )
+                        else:
+                            cred_list = cred_lists[0]
+                            logger.info(f"Utilisation de la credential list existante: {cred_list.sid}")
+                        
+                        # Client LiveKit
+                        livekit_api = api.LiveKitAPI()
+                        
+                        # Configurer le domaine
+                        domain_name = f"{trunk.sid}.sip.twilio.com"
+                        
+                        # Créer un nouvel objet trunk SIP dans LiveKit
+                        trunk_info = SIPOutboundTrunkInfo(
+                            name="Twilio Trunk",
+                            address=domain_name,
+                            numbers=[phone_number],
+                            auth_username="livekit_user",
+                            auth_password="s3cur3p@ssw0rd"
+                        )
+                        
+                        # Envoyer la requête à LiveKit
+                        request = CreateSIPOutboundTrunkRequest(trunk=trunk_info)
+                        response = await livekit_api.sip.create_sip_outbound_trunk(request)
+                        
+                        # Récupérer l'ID du nouveau trunk
+                        trunk_id = getattr(response, 'sid', getattr(response, 'id', str(response)))
+                        
+                        # Mettre à jour la variable d'environnement
+                        os.environ['OUTBOUND_TRUNK_ID'] = trunk_id
+                        
+                        return {
+                            "success": True,
+                            "old_trunk_id": existing_trunk_id,
+                            "new_trunk_id": trunk_id,
+                            "twilioTrunkSid": trunk.sid,
+                            "domainName": domain_name,
+                            "message": "Nouveau trunk SIP configuré avec succès"
+                        }
+                        
+                    except Exception as e:
+                        logger.error(f"Erreur de configuration du trunk: {e}")
+                        return {
+                            "success": False,
+                            "error": str(e),
+                            "traceback": traceback.format_exc()
+                        }
+                finally:
+                    if livekit_api:
+                        await livekit_api.aclose()
+            
+            # Exécuter la fonction asynchrone
+            result = asyncio.run(reconfigure_trunk_async())
+            return jsonify(result)
+            
+        except Exception as e:
+            logger.exception("Erreur lors de la reconfiguration du trunk")
+            return jsonify({
+                "success": False,
+                "error": str(e),
+                "traceback": traceback.format_exc()
+            }), 500
