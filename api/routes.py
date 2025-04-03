@@ -630,9 +630,27 @@ def register_routes(app):
                         }
                     
                     # Vérifier le trunk dans LiveKit
-                    trunks = await livekit_api.sip.list_sip_outbound_trunk(
-                        api.ListSIPOutboundTrunkRequest(ids=[trunk_id])
-                    )
+                    # Correction ici: le champ est probablement 'trunk_ids' ou autre chose au lieu de 'ids'
+                    try:
+                        # Première tentative avec trunk_ids
+                        trunks = await livekit_api.sip.list_sip_outbound_trunk(
+                            api.ListSIPOutboundTrunkRequest(trunk_ids=[trunk_id])
+                        )
+                    except Exception as e:
+                        if "field" in str(e):
+                            # Si cette approche échoue, essayons de lister tous les trunks sans paramètre
+                            logger.warning(f"La requête a échoué avec trunk_ids, essai sans filtre: {e}")
+                            trunks = await livekit_api.sip.list_sip_outbound_trunk(
+                                api.ListSIPOutboundTrunkRequest()
+                            )
+                        else:
+                            # Autre erreur, relancer
+                            raise
+                    
+                    # Filtrer manuellement les trunks pour trouver le nôtre
+                    matching_trunks = [t for t in getattr(trunks, 'trunks', []) if getattr(t, 'id', None) == trunk_id or getattr(t, 'sid', None) == trunk_id]
+                    trunk_exists = len(matching_trunks) > 0
+                    trunk_details = matching_trunks[0] if matching_trunks else None
                     
                     # Vérifier le trunk dans Twilio
                     from twilio.rest import Client
@@ -654,12 +672,12 @@ def register_routes(app):
                         "success": True,
                         "livekit_trunk": {
                             "id": trunk_id,
-                            "exists": len(trunks.trunks) > 0,
+                            "exists": trunk_exists,
                             "details": {
-                                "name": trunks.trunks[0].name if trunks.trunks else None,
-                                "address": trunks.trunks[0].address if trunks.trunks else None,
-                                "numbers": trunks.trunks[0].numbers if trunks.trunks else None
-                            } if trunks.trunks else None
+                                "name": trunk_details.name if trunk_details else None,
+                                "address": trunk_details.address if trunk_details else None,
+                                "numbers": trunk_details.numbers if trunk_details else None
+                            } if trunk_details else None
                         },
                         "twilio_trunk": twilio_trunk_info
                     }
@@ -683,7 +701,7 @@ def register_routes(app):
                 "error": str(e),
                 "traceback": traceback.format_exc()
             }), 500
-            
+                
     @app.route("/api/sip/direct-call", methods=["POST"])
     def direct_sip_call():
         """Test d'appel direct via l'API SIP de LiveKit"""
