@@ -120,59 +120,53 @@ def register_routes(app):
             }), 500
     
     @app.route("/api/inbound/dispatch/setup", methods=["POST"])
-    def setup_dispatch_rule():
-        """Endpoint pour configurer une règle de dispatch pour les appels entrants"""
-        try:
-            data = request.json or {}
-            agent_name = data.get("agent_name", "inbound-agent")
-            room_prefix = data.get("room_prefix", "call-")
-            
-            # Créer un fichier temporaire de configuration
-            rule_config = {
-                "name": "Inbound Call Rule",
-                "rule": {
-                    "dispatchRuleIndividual": {
-                        "roomPrefix": room_prefix
-                    }
-                },
-                "room_config": {
-                    "agents": [
-                        {
-                            "agent_name": agent_name
-                        }
-                    ]
+def setup_dispatch_rule():
+    """Endpoint pour configurer une règle de dispatch pour les appels entrants"""
+    try:
+        data = request.json or {}
+        agent_name = data.get("agent_name", "inbound-agent")
+        room_prefix = data.get("room_prefix", "call-")
+        
+        # Créer un fichier temporaire de configuration
+        rule_config = {
+            "name": "Inbound Call Rule",
+            "rule": {
+                "dispatchRuleIndividual": {
+                    "roomPrefix": room_prefix
                 }
-            }
-            
-            temp_file = "temp_dispatch_rule.json"
-            with open(temp_file, "w") as f:
-                json.dump(rule_config, f)
-            
-            # Importer et exécuter le script de configuration directement
-            from scripts.setup_dispatch_rule import create_dispatch_rule
-            
-            rule_id = asyncio.run(create_dispatch_rule(temp_file))
-            
-            # Supprimer le fichier temporaire
-            try:
-                os.remove(temp_file)
-            except:
-                pass
-            
-            return jsonify({
-                "success": True,
-                "rule_id": rule_id,
-                "agent_name": agent_name,
-                "room_prefix": room_prefix,
-                "message": "Règle de dispatch configurée avec succès"
-            })
-            
-        except Exception as e:
-            return jsonify({
-                "success": False,
-                "error": str(e),
-                "traceback": traceback.format_exc()
-            }), 500
+            },
+            "agent_name": agent_name  # Simplifié pour s'adapter à la nouvelle structure
+        }
+        
+        temp_file = "temp_dispatch_rule.json"
+        with open(temp_file, "w") as f:
+            json.dump(rule_config, f)
+        
+        # Importer et exécuter le script de configuration directement
+        from scripts.setup_dispatch_rule import create_dispatch_rule
+        
+        rule_id = asyncio.run(create_dispatch_rule(temp_file))
+        
+        # Supprimer le fichier temporaire
+        try:
+            os.remove(temp_file)
+        except:
+            pass
+        
+        return jsonify({
+            "success": True,
+            "rule_id": rule_id,
+            "agent_name": agent_name,
+            "room_prefix": room_prefix,
+            "message": "Règle de dispatch configurée avec succès"
+        })
+        
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }), 500
     
     @app.route("/api/agent/status", methods=["GET"])
     def check_agent_status():
