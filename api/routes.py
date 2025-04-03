@@ -314,24 +314,27 @@ def register_routes(app):
                     # Vérifier si on doit inclure l'agent dans la configuration
                     include_agent = request.json.get("includeAgent", True) if request.json else True
                     
-                    # Création de la règle de dispatch avec les objets appropriés du SDK
-                    dispatch_rule_request = CreateSIPDispatchRuleRequest(
-                        rule=SIPDispatchRule(
+                    # Création des paramètres de la requête
+                    request_params = {
+                        "rule": SIPDispatchRule(
                             dispatch_rule_individual=SIPDispatchRuleIndividual(
                                 room_prefix="call-"
                             )
                         )
-                    )
+                    }
                     
-                    # Ajout de la configuration des agents si nécessaire
+                    # Ajouter la configuration de l'agent si nécessaire
                     if include_agent:
-                        dispatch_rule_request.room_config = api.RoomConfiguration(
+                        request_params["room_config"] = api.RoomConfiguration(
                             agents=[
                                 api.RoomAgentDispatch(
                                     agent_name="outbound-caller"
                                 )
                             ]
                         )
+                    
+                    # Création de la requête avec les paramètres
+                    dispatch_rule_request = CreateSIPDispatchRuleRequest(**request_params)
                     
                     # Envoi de la requête à LiveKit
                     response = await livekit_api.sip.create_sip_dispatch_rule(dispatch_rule_request)
@@ -341,6 +344,7 @@ def register_routes(app):
                         "ruleId": response.id,
                         "message": "Règle de dispatch SIP créée avec succès"
                     }
+                    
                 except Exception as e:
                     logger.error(f"Erreur lors de la configuration de la règle: {e}")
                     return {
@@ -358,96 +362,6 @@ def register_routes(app):
             return jsonify(result)
         except Exception as e:
             logger.exception("Erreur lors de la configuration de la règle de dispatch")
-            return jsonify({
-                "success": False,
-                "error": str(e),
-                "traceback": traceback.format_exc()
-            }), 500
-
-    @app.route("/api/dispatch/test", methods=["POST"])
-    def test_dispatch():
-        """Endpoint pour tester la création d'un dispatch"""
-        data = request.json
-        if not data or "phone" not in data:
-            return jsonify({"error": "Numéro de téléphone manquant"}), 400
-        
-        phone_number = data["phone"]
-        
-        # Vérifier et normaliser le format du numéro
-        if not phone_number.startswith('+'):
-            phone_number = f"+{phone_number}"
-        
-        # Supprimer les caractères spéciaux comme tirets ou espaces
-        phone_number = ''.join(c for c in phone_number if c.isdigit() or c == '+')
-        logger.info(f"Numéro formaté pour le test de dispatch: {phone_number}")
-        
-        try:
-            from livekit import api
-            
-            async def create_test_dispatch():
-                livekit_api = None
-                try:
-                    livekit_api = api.LiveKitAPI()
-                    
-                    # Vérifier si OUTBOUND_TRUNK_ID est défini
-                    trunk_id = os.getenv('OUTBOUND_TRUNK_ID')
-                    if not trunk_id:
-                        return {
-                            "success": False,
-                            "error": "Aucun trunk SIP configuré. Utilisez /api/trunk/setup/direct d'abord."
-                        }
-                    
-                    # Si l'ID du trunk contient du texte comme "sip_trunk_id:", extrayons l'ID réel
-                    match = re.search(r'sip_trunk_id: "([^"]+)"', trunk_id)
-                    if match:
-                        trunk_id = match.group(1)
-                        # Mettre à jour la variable d'environnement avec l'ID propre
-                        os.environ['OUTBOUND_TRUNK_ID'] = trunk_id
-                        logger.info(f"ID du trunk corrigé: {trunk_id}")
-                    
-                    # Génération d'un nom de room unique
-                    unique_room_name = f"dispatch-{secrets.token_hex(4)}"
-                    
-                    # Création du dispatch - modification de la méthode
-                    dispatch = await livekit_api.agent_dispatch.create_dispatch(
-                        api.CreateAgentDispatchRequest(
-                            agent_name="outbound-caller",
-                            room=unique_room_name,
-                            metadata=json.dumps({
-                                "phone_number": phone_number,
-                                "trunk_id": trunk_id
-                            })
-                        )
-                    )
-                    
-                    return {
-                        "success": True,
-                        "roomName": dispatch.room,
-                        "dispatchId": dispatch.id,
-                        "message": f"Dispatch créé pour {phone_number}"
-                    }
-                
-                except Exception as e:
-                    logger.error(f"Erreur de dispatch: {e}")
-                    return {
-                        "success": False,
-                        "error": str(e),
-                        "traceback": traceback.format_exc()
-                    }
-                finally:
-                    if livekit_api:
-                        await livekit_api.aclose()
-            
-            # Exécuter la fonction asynchrone
-            result = asyncio.run(create_test_dispatch())
-            
-            if result['success']:
-                return jsonify(result)
-            else:
-                return jsonify(result), 500
-        
-        except Exception as e:
-            logger.exception("Erreur lors du test de dispatch")
             return jsonify({
                 "success": False,
                 "error": str(e),
