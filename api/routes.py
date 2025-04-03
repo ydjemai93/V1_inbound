@@ -661,43 +661,10 @@ def register_routes(app):
                             "error": "Aucun trunk SIP configuré"
                         }
                     
-                    # Si l'ID du trunk contient du texte comme "sip_trunk_id:", extrayons l'ID réel
-                    match = re.search(r'sip_trunk_id: "([^"]+)"', trunk_id)
-                    if match:
-                        clean_trunk_id = match.group(1)
-                        # Mettre à jour la variable d'environnement avec l'ID propre
-                        os.environ['OUTBOUND_TRUNK_ID'] = clean_trunk_id
-                        logger.info(f"ID du trunk corrigé: {clean_trunk_id}")
-                        trunk_id = clean_trunk_id
-                    
                     # Vérifier le trunk dans LiveKit
-                    try:
-                        # Tenter d'utiliser la bonne méthode selon la version de l'API
-                        try:
-                            # Pour les versions plus récentes de l'API
-                            trunks = await livekit_api.sip.list_sip_outbound_trunk(
-                                api.ListSIPOutboundTrunkRequest(ids=[trunk_id])
-                            )
-                        except Exception as e1:
-                            logger.warning(f"Première méthode échouée: {e1}")
-                            # Pour les versions antérieures
-                            trunks = await livekit_api.sip.list_sip_outbound_trunk()
-                    except Exception as e:
-                        logger.error(f"Erreur lors de la vérification du trunk: {e}")
-                        trunks = None
-                    
-                    # Vérifier les résultats
-                    trunk_exists = False
-                    trunk_details = None
-                    
-                    if trunks and hasattr(trunks, 'trunks'):
-                        # Filtrer les trunks pour trouver celui qui correspond à notre ID
-                        matching_trunks = [
-                            t for t in trunks.trunks 
-                            if getattr(t, 'id', '') == trunk_id or getattr(t, 'sid', '') == trunk_id
-                        ]
-                        trunk_exists = len(matching_trunks) > 0
-                        trunk_details = matching_trunks[0] if matching_trunks else None
+                    trunks = await livekit_api.sip.list_sip_outbound_trunk(
+                        api.ListSIPOutboundTrunkRequest(ids=[trunk_id])
+                    )
                     
                     # Vérifier le trunk dans Twilio
                     from twilio.rest import Client
@@ -717,15 +684,14 @@ def register_routes(app):
                     
                     return {
                         "success": True,
-                        "trunk_id": trunk_id,
                         "livekit_trunk": {
                             "id": trunk_id,
-                            "exists": trunk_exists,
+                            "exists": len(trunks.trunks) > 0,
                             "details": {
-                                "name": trunk_details.name if trunk_details else None,
-                                "address": trunk_details.address if trunk_details else None,
-                                "numbers": trunk_details.numbers if trunk_details else None
-                            } if trunk_details else None
+                                "name": trunks.trunks[0].name if trunks.trunks else None,
+                                "address": trunks.trunks[0].address if trunks.trunks else None,
+                                "numbers": trunks.trunks[0].numbers if trunks.trunks else None
+                            } if trunks.trunks else None
                         },
                         "twilio_trunk": twilio_trunk_info
                     }
@@ -739,10 +705,13 @@ def register_routes(app):
                 finally:
                     if livekit_api:
                         await livekit_api.aclose()
-                        result = asyncio.run(check_trunk())
+            
+            # Définir result ici
+            result = asyncio.run(check_trunk())
             return jsonify(result)
         
         except Exception as e:
+            # Ici aussi, assurez-vous de retourner une réponse JSON
             return jsonify({
                 "success": False,
                 "error": str(e),
