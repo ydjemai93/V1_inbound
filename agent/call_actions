@@ -1,0 +1,120 @@
+import logging
+import asyncio
+import json
+from typing import Annotated
+from livekit.agents.llm import FunctionContext
+from livekit.api import RoomParticipantIdentity
+
+logger = logging.getLogger(__name__)
+
+class CallActions(FunctionContext):
+    """
+    Actions que l'agent peut effectuer pendant un appel téléphonique entrant
+    """
+    
+    def __init__(self, api, participant, room):
+        """
+        Initialisation des actions d'appel
+        
+        Args:
+            api: Instance API LiveKit
+            participant: Participant SIP (appelant)
+            room: Room LiveKit actuelle
+        """
+        super().__init__()
+        self.api = api
+        self.participant = participant
+        self.room = room
+        
+        # Extraire des informations sur l'appelant
+        self.caller_number = participant.attributes.get("sip.from", "Inconnu")
+        self.called_number = participant.attributes.get("sip.to", "Inconnu")
+        
+        logger.info(f"Actions d'appel initialisées pour l'appelant: {self.caller_number}")
+    
+    async def hangup(self):
+        """
+        Raccrocher l'appel en cours
+        """
+        try:
+            if not self.participant:
+                logger.warning("Tentative de raccrocher alors qu'aucun participant n'est défini")
+                return
+                
+            logger.info(f"Raccrochage de l'appel avec {self.participant.identity}")
+            await self.api.room.remove_participant(
+                RoomParticipantIdentity(
+                    room=self.room.name,
+                    identity=self.participant.identity,
+                )
+            )
+        except Exception as e:
+            logger.error(f"Erreur lors du raccrochage: {e}")
+    
+    @FunctionContext.ai_callable()
+    async def end_call(self):
+        """Called when the agent needs to end the call"""
+        logger.info(f"Fin de l'appel avec {self.participant.identity}")
+        await self.hangup()
+        return "Call ended successfully"
+    
+    @FunctionContext.ai_callable()
+    async def transfer_to_human(self, 
+                             reason: Annotated[str, "Reason for transferring to a human agent"] = None):
+        """Called when the agent needs to transfer the call to a human agent"""
+        logger.info(f"Transfert vers un agent humain demandé pour {self.participant.identity}: {reason}")
+        
+        # Dans une vraie implémentation, ici on pourrait:
+        # 1. Placer l'appel dans une file d'attente
+        # 2. Notifier un agent humain
+        # 3. Transférer l'appel vers un autre système
+        
+        # Simulation du transfert
+        return "The call would be transferred to a human agent. This is a simulation."
+    
+    @FunctionContext.ai_callable()
+    async def collect_customer_info(self, 
+                                 name: Annotated[str, "Customer name"] = None,
+                                 email: Annotated[str, "Customer email"] = None,
+                                 issue: Annotated[str, "Customer issue"] = None):
+        """Called when the agent has collected important customer information"""
+        logger.info(f"Informations client collectées pour {self.participant.identity}")
+        
+        # Enregistrer les informations client
+        customer_info = {
+            "phone_number": self.caller_number,
+            "name": name,
+            "email": email,
+            "issue": issue,
+            "timestamp": asyncio.get_event_loop().time()
+        }
+        
+        # Dans une vraie implémentation, ces informations seraient enregistrées dans une base de données
+        logger.info(f"Informations client: {json.dumps(customer_info)}")
+        
+        return "Customer information has been collected and stored"
+    
+    @FunctionContext.ai_callable()
+    async def create_support_ticket(self, 
+                                 issue: Annotated[str, "Description of the customer issue"] = None,
+                                 priority: Annotated[int, "Priority level (1-5)"] = 3):
+        """Called when the agent needs to create a support ticket"""
+        logger.info(f"Création d'un ticket de support pour {self.participant.identity}")
+        
+        # Créer un ticket de support
+        ticket = {
+            "customer_phone": self.caller_number,
+            "issue": issue,
+            "priority": priority,
+            "timestamp": asyncio.get_event_loop().time(),
+            "status": "open"
+        }
+        
+        # Dans une vraie implémentation, le ticket serait créé dans un système de gestion de tickets
+        logger.info(f"Ticket de support créé: {json.dumps(ticket)}")
+        
+        # Générer un numéro de ticket fictif
+        import random
+        ticket_number = f"TKT-{random.randint(10000, 99999)}"
+        
+        return f"Support ticket {ticket_number} has been created"
