@@ -24,7 +24,7 @@ app = Flask(__name__)
 CORS(app)
 
 # Import des routes
-from routes import register_routes
+from .routes import register_routes
 
 # Enregistrement des routes
 register_routes(app)
